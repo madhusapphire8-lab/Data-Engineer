@@ -1,0 +1,187 @@
+Bronze layer Read data & create dataframe
+
+customers_raw = spark.read.format("csv") \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .load("Files/Bronze/customers.csv")
+
+orders_raw = spark.read.format("csv") \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .load("Files/Bronze/orders.csv")
+
+  payments_raw = spark.read.format("csv") \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .load("Files/Bronze/payments.csv")
+
+  support_raw = spark.read.format("csv") \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .load("Files/Bronze/support_tickets.csv")
+
+  web_raw = spark.read.format("csv") \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .load("Files/Bronze/web_activities.csv")
+
+
+  display(customers_raw.limit(10))
+
+  display(orders_raw.limit(10))
+
+  display(payments_raw.limit(10))
+
+  display(support_raw.limit(10))
+
+  display(web_raw.limit(10))
+
+Save as Bronze Delta Tables
+
+customers_raw.write.format("delta").mode("overwrite").saveAsTable("Bronze.customers")
+orders_raw.write.format("delta").mode("overwrite").saveAsTable("Bronze.orders")
+payments_raw.write.format("delta").mode("overwrite").saveAsTable("Bronze.payments")
+support_raw.write.format("delta").mode("overwrite").saveAsTable("Bronze.support")
+web_raw.write.format("delta").mode("overwrite").saveAsTable("Bronze.web")
+
+Silver Layer – Clean & Normalize
+
+from pyspark.sql.functions import *
+from pyspark.sql.types import DoubleType
+
+# Clean customers
+customers = spark.table("bronze.customers")
+
+customers_clean = (
+    customers_raw
+    .withColumn("email", lower(trim(col("EMAIL"))))
+    .withColumn("name", initcap(trim(col("name"))))
+    .withColumn("gender", when(lower(col("gender")).isin("f", "female"), "Female")
+                          .when(lower(col("gender")).isin("m", "male"), "Male")
+                          .otherwise("Other"))
+    .withColumn("dob", to_date(regexp_replace(col("dob"), "/", "-")))
+    .withColumn("location", initcap(col("location")))
+    .dropDuplicates(["customer_id"])
+    .dropna(subset=["customer_id", "email"])
+)
+
+display(customers_clean.limit(10))
+customers_clean.write.format("delta").mode("overwrite").saveAsTable("Silver.silver_customers"
+
+
+  Clean orders
+
+  # Clean orders
+orders = spark.table("bronze.orders")
+orders_clean = (
+    orders_raw
+    .withColumn("order_date", 
+                when(col("order_date").rlike("^\d{4}/\d{2}/\d{2}$"), to_date(col("order_date"), "yyyy/MM/dd"))
+                .when(col("order_date").rlike("^\d{2}-\d{2}-\d{4}$"), to_date(col("order_date"), "dd-MM-yyyy"))
+                .when(col("order_date").rlike("^\d{8}$"), to_date(col("order_date"), "yyyyMMdd"))
+                .otherwise(to_date(col("order_date"), "yyyy-MM-dd")))
+    .withColumn("amount", col("amount").cast(DoubleType()))
+    .withColumn("amount", when(col("amount") < 0, None).otherwise(col("amount")))
+    .withColumn("status", initcap(col("status")))
+    .dropna(subset=["customer_id", "order_date"])
+    .dropDuplicates(["order_id"])
+)
+display(orders_clean.limit(10))
+orders_clean.write.format("delta").mode("overwrite").saveAsTable("Silver.silver_orders")
+
+
+
+  Clean payments
+
+payments = spark.table("bronze.payments")
+payments_clean = (
+    payments_raw
+    .withColumn("payment_date", to_date(regexp_replace(col("payment_date"), "/", "-")))
+    .withColumn("payment_method", initcap(col("payment_method")))
+    .replace({"creditcard": "Credit Card"}, subset=["payment_method"])
+    .withColumn("payment_status", initcap(col("payment_status")))
+    .withColumn("amount", col("amount").cast(DoubleType()))
+    .withColumn("amount", when(col("amount") < 0, None).otherwise(col("amount")))
+    .dropna(subset=["customer_id", "payment_date", "amount"])
+)
+display(payments_clean.limit(10))
+payments_clean.write.format("delta").mode("overwrite").saveAsTable("Silver.silver_payments")
+
+  Clean support tickets
+
+
+support = spark.table("bronze.support")
+support_clean = (
+    support_raw
+    .withColumn("ticket_date", to_date(regexp_replace(col("ticket_date"), "/", "-")))
+    .withColumn("issue_type", initcap(trim(col("issue_type"))))
+    .withColumn("resolution_status", initcap(trim(col("resolution_status"))))
+    .replace({"NA": None, "": None}, subset=["issue_type", "resolution_status"])
+    .dropDuplicates(["ticket_id"])
+    .dropna(subset=["customer_id", "ticket_date"])
+)
+display(support_clean.limit(10))
+support_clean.write.format("delta").mode("overwrite").saveAsTable("Silver.silver_support")
+
+  Clean web
+
+web = spark.table("bronze.web")
+web_clean = (
+    web_raw
+    .withColumn("session_time", to_date(regexp_replace(col("session_time"), "/", "-")))
+    .withColumn("page_viewed", lower(col("page_viewed")))
+    .withColumn("device_type", initcap(col("device_type")))
+    .dropDuplicates(["session_id"])
+    .dropna(subset=["customer_id", "session_time", "page_viewed"])
+)
+display(web_clean.limit(10))
+web_clean.write.format("delta").mode("overwrite").saveAsTable("Silver.silver_web")
+
+
+  Gold
+from pyspark.sql.functions import col
+
+cust = spark.table("Silver.silver_customers").alias("c")
+orders = spark.table("Silver.silver_orders").alias("o")
+payments = spark.table("Silver.silver_payments").alias("p")
+support = spark.table("Silver.silver_support").alias("s")
+web = spark.table("Silver.silver_web").alias("w")
+
+customer360 = (
+    cust
+    .join(orders, "customer_id", "left")
+    .join(payments, "customer_id", "left")
+    .join(support, "customer_id", "left")
+    .join(web, "customer_id", "left")
+    .select(
+        col("c.customer_id"),
+        col("c.name"),
+        col("c.email"),
+        col("c.gender"),
+        col("c.dob"),
+        col("c.location"),
+
+        col("o.order_id"),
+        col("o.order_date"),
+        col("o.amount").alias("order_amount"),
+        col("o.status"),
+
+        col("p.payment_method"),
+        col("p.payment_status"),
+        col("p.amount").alias("payment_amount"),
+
+        col("s.ticket_id"),
+        col("s.issue_type"),
+        col("s.ticket_date"),
+        col("s.resolution_status"),
+
+        col("w.page_viewed"),
+        col("w.device_type"),
+        col("w.session_time")
+    )
+)
+display(customer360.limit(15))
+customer360.write.format("delta") \
+    .mode("overwrite") \
+    .saveAsTable("Gold.gold_customer360")
+  
